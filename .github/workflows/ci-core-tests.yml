@@ -24,10 +24,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate shell syntax
-        run: bash -n ./*.sh ./tests/*.sh
+        run: bash -n ./*.sh ./tests/*.sh ./tests/lib/*.sh
 
       - name: Run ShellCheck
-        run: shellcheck ./*.sh ./tests/*.sh
+        run: shellcheck ./*.sh ./tests/*.sh ./tests/lib/*.sh
 
       - name: Run regression tests
         run: ./tests/run.sh

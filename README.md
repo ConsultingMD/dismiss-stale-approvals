@@ -65,6 +65,19 @@ Because `git range-diff` does not evaluate merge commits, a compared range that
 contains a merge commit is also conservatively treated as changed.
 If dismissal itself fails, the job fails and should remain merge-blocking.
 
+## Testing
+
+Run the complete local suite with:
+
+```bash
+./tests/run.sh
+```
+
+The runner automatically discovers focused `tests/test_*.sh` files. Add new
+regressions to the test file matching the affected behavior, or create another
+focused file when introducing a new behavior area. Shared assertions live in
+`tests/lib/assertions.sh`.
+
 ## Issues and contributions
 
 We (the Graphite team) have limited staffing in this area (mainly due to the need for DSA being a relatively small number of customers), which is why the action is OSS in the first place. It was an issue an enterprise customer asked us for input on while trialing so we created it as the simplest possible solution for the problem as a proof-of-concept. We don't expect it to solve the problem for every single Graphite customer exactly as implemented, which is why some of our other larger customers have forked the repo for their desired use.
