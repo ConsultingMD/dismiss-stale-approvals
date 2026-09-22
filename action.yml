@@ -175,11 +175,12 @@ runs:
       run: |
         set -euo pipefail
         umask 077
-        printf '%s\n%s\n' "$HEAD_SHA" "$BASE_SHA" > "$CURRENT_SHAS_FILE"
+        install -d -m 700 "$CURRENT_SHAS_DIR"
+        printf '%s\n%s\n' "$HEAD_SHA" "$BASE_SHA" > "$CURRENT_SHAS_DIR/shas.txt"
       env:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        CURRENT_SHAS_FILE: ${{ runner.temp }}/dismiss-stale-approvals-${{ github.run_id }}-shas.txt
+        CURRENT_SHAS_DIR: ${{ runner.temp }}/dismiss-stale-approvals-${{ github.run_id }}
 
     - name: Upload SHAs
       if: steps.check.outcome == 'success'
@@ -187,7 +188,7 @@ runs:
       continue-on-error: true
       with:
         name: dismiss-stale-approvals-shas
-        path: ${{ runner.temp }}/dismiss-stale-approvals-${{ github.run_id }}-shas.txt
+        path: ${{ runner.temp }}/dismiss-stale-approvals-${{ github.run_id }}/shas.txt
         retention-days: 30
 
     - name: Dismiss approvals unless diff is proven unchanged
