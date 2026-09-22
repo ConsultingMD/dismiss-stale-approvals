@@ -3,6 +3,15 @@
 A GitHub action to automatically dismiss stale approvals on pull requests.
 Unlike the built in GitHub protection, this action will compare the `git range-diff` of the new version against the previous version, and only dismiss approvals if the diff has changed.
 
+## How it works
+
+The action restores the previous pull request head and base SHAs, compares them
+with the current commit range, and dismisses only approvals attached to older
+commits when the changes cannot be proven equivalent.
+
+See [How dismiss-stale-approvals works](docs/how-it-works.md) for the data
+boundaries, end-to-end flow, security behavior, and failure outcomes.
+
 ## Usage
 
 1. Add the below workflow to your repository's `.github/workflows` directory.
