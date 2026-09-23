@@ -4,119 +4,220 @@ author: 'Graphite'
 
 inputs:
   github-token:
-    description:
-      'A GITHUB_TOKEN secret or PAT that has write access to the repository'
+    description: 'The repository-scoped GITHUB_TOKEN'
     required: true
   fetch-depth:
-    default: 250
+    default: '250'
     description:
       'The maximum length of a branch from head to base that will be compared to the previous run. If the branch is longer than this number, reviews will always be dismissed.'
     required: false
   dry-run:
     description: 'Comment on the PR instead of dismissing approvals.'
     required: false
-    default: false
+    default: 'false'
 
 runs:
-  using: "composite"
+  using: 'composite'
   steps:
-    - name: Set Workflow Run URL as Output
-      shell: bash
-      run: |
-        REPO_URL="https://github.com/${{ github.repository }}"
-        RUN_URL="$REPO_URL/actions/runs/${{ github.run_id }}"
-        echo WORKFLOW_RUN_URL="$RUN_URL" >> $GITHUB_ENV
-
-    - name: Set GitHub path
-      shell: bash
-      run: echo "$GITHUB_ACTION_PATH" >> $GITHUB_PATH
-
     - name: Download SHAs from last run
+      id: previous
       shell: bash
       run: |
-        latest_artifact.sh "${{ inputs.github-token }}" "${{ github.repository }}" "${{ github.event.pull_request.number }}" "$HEAD_REF" "${{ github.workflow }}" "dismiss-stale-approvals-shas" || true
-        if [ -f shas.txt ]; then
-          echo "PREV_HEAD_SHA=$(head -n 1 shas.txt)" >> $GITHUB_ENV
-          echo "PREV_BASE_SHA=$(tail -n 1 shas.txt)" >> $GITHUB_ENV
+        set -euo pipefail
+        echo "found=false" >> "$GITHUB_OUTPUT"
+
+        if "$GITHUB_ACTION_PATH/latest_artifact.sh" \
+          "$REPOSITORY" \
+          "$PR_NUMBER" \
+          "$HEAD_REF" \
+          "$RUN_ID" \
+          "dismiss-stale-approvals-shas" \
+          "$PREVIOUS_SHAS_FILE"; then
+          previous_head_sha=$(awk 'NR == 1 { print; exit }' "$PREVIOUS_SHAS_FILE")
+          previous_base_sha=$(awk 'NR == 2 { print; exit }' "$PREVIOUS_SHAS_FILE")
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "head-sha=$previous_head_sha" >> "$GITHUB_OUTPUT"
+          echo "base-sha=$previous_base_sha" >> "$GITHUB_OUTPUT"
+        else
+          echo "::notice::No valid previous SHA artifact was found; changes will be assumed."
         fi
       env:
-        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPOSITORY: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
         HEAD_REF: ${{ github.head_ref }}
-
-    - name: Read SHAs
-      shell: bash
-      run: |
-       echo "HEAD_SHA=${{ github.event.pull_request.head.sha }}" >> $GITHUB_ENV
-       echo "BASE_SHA=${{ github.event.pull_request.base.sha }}" >> $GITHUB_ENV
+        RUN_ID: ${{ github.run_id }}
+        PREVIOUS_SHAS_FILE: ${{ runner.temp }}/dismiss-stale-approvals-${{ github.run_id }}-previous-shas.txt
 
     - name: Check if diff has changed
       continue-on-error: true
       id: check
       shell: bash
       run: |
-        echo "MATCH=0" >> $GITHUB_ENV
+        set -euo pipefail
+        echo "changed=true" >> "$GITHUB_OUTPUT"
+        echo "reason=check-failed" >> "$GITHUB_OUTPUT"
 
-        if [ -z "${{ env.PREV_HEAD_SHA }}" ] || [ -z "${{ env.PREV_BASE_SHA }}" ]; then
-          echo ::notice:: "No previous SHAs found; behaving as if diff has changed"
-          echo "MATCH=-1" >> $GITHUB_ENV
+        if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+          echo "::error::Invalid repository name"
+          exit 1
+        fi
+        if [[ ! "$FETCH_DEPTH" =~ ^[1-9][0-9]{0,5}$ ]] || (( FETCH_DEPTH > 100000 )); then
+          echo "::error::fetch-depth must be an integer between 1 and 100000"
+          exit 1
+        fi
+        for sha in "$HEAD_SHA" "$BASE_SHA"; do
+          if [[ ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::The pull request event contained an invalid commit SHA"
+            exit 1
+          fi
+        done
+
+        if [[ "$BASELINE_FOUND" != "true" ]]; then
+          echo "::notice::No previous SHAs found; behaving as if the diff changed"
+          echo "reason=no-baseline" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
-        git init -q --bare bare.git
-        cd bare.git
-        git remote add origin https://oauth2:"${{ inputs.github-token }}"@github.com/"${{ github.repository }}".git
-        git fetch -q origin --depth="${{ inputs.fetch-depth }}" "${{ env.PREV_BASE_SHA }}" "${{ env.PREV_HEAD_SHA }}" "${{ env.BASE_SHA }}" "${{ env.HEAD_SHA }}"
+        for sha in "$PREV_HEAD_SHA" "$PREV_BASE_SHA"; do
+          if [[ ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::The previous-run artifact contained an invalid commit SHA"
+            exit 1
+          fi
+        done
 
-        PREV_MERGE_BASE=$(git merge-base "${{ env.PREV_BASE_SHA }}" "${{ env.PREV_HEAD_SHA }}")
-        MERGE_BASE=$(git merge-base "${{ env.BASE_SHA }}" "${{ env.HEAD_SHA }}")
+        work_dir=$(mktemp -d "${RUNNER_TEMP}/dismiss-stale-approvals.XXXXXX")
+        trap 'rm -rf "$work_dir"' EXIT
+        repo_dir="$work_dir/repository.git"
+        askpass="$work_dir/git-askpass.sh"
+        cat > "$askpass" <<'EOF'
+        #!/usr/bin/env bash
+        case "$1" in
+          *Username*) printf '%s\n' 'oauth2' ;;
+          *Password*) printf '%s\n' "$GITHUB_TOKEN" ;;
+          *) exit 1 ;;
+        esac
+        EOF
+        chmod 700 "$askpass"
+
+        git init -q --bare "$repo_dir"
+        git -C "$repo_dir" remote add origin "https://github.com/${REPOSITORY}.git"
+        GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git -C "$repo_dir" fetch \
+          --quiet \
+          --no-tags \
+          --depth="$FETCH_DEPTH" \
+          origin \
+          "$PREV_BASE_SHA" \
+          "$PREV_HEAD_SHA" \
+          "$BASE_SHA" \
+          "$HEAD_SHA"
+
+        PREV_MERGE_BASE=$(git -C "$repo_dir" merge-base "$PREV_BASE_SHA" "$PREV_HEAD_SHA")
+        MERGE_BASE=$(git -C "$repo_dir" merge-base "$BASE_SHA" "$HEAD_SHA")
         echo "Merge bases: $PREV_MERGE_BASE $MERGE_BASE"
 
-        RANGE_DIFF=$(git range-diff "$PREV_MERGE_BASE".."${{ env.PREV_HEAD_SHA }}" "$MERGE_BASE".."${{ env.HEAD_SHA }}")
-        HAS_CHANGES=$(echo "$RANGE_DIFF" | awk '{print $3}' | grep -vq '^=$'; echo $?)
-
-        if [ "$HAS_CHANGES" == "0" ]; then
-          echo "MATCH=0" >> $GITHUB_ENV
-          echo ::notice:: "PR was modified:
-        $(git range-diff --color=always "$PREV_MERGE_BASE".."${{ env.PREV_HEAD_SHA }}" "$MERGE_BASE".."${{ env.HEAD_SHA }}")"
-        else
-          echo "MATCH=1" >> $GITHUB_ENV
-          echo "PR was not modified, range diff for debugging:"
-          echo "$RANGE_DIFF"
+        range_diff_file="$work_dir/range-diff.txt"
+        git -C "$repo_dir" range-diff --no-color \
+          "$PREV_MERGE_BASE..$PREV_HEAD_SHA" \
+          "$MERGE_BASE..$HEAD_SHA" > "$range_diff_file"
+        previous_has_merges=false
+        current_has_merges=false
+        previous_merge_commit=$(
+          git -C "$repo_dir" rev-list \
+            --merges \
+            --max-count=1 \
+            "$PREV_MERGE_BASE..$PREV_HEAD_SHA"
+        )
+        current_merge_commit=$(
+          git -C "$repo_dir" rev-list \
+            --merges \
+            --max-count=1 \
+            "$MERGE_BASE..$HEAD_SHA"
+        )
+        if [[ -n "$previous_merge_commit" ]]; then
+          previous_has_merges=true
         fi
+        if [[ -n "$current_merge_commit" ]]; then
+          current_has_merges=true
+        fi
+        classification=$(
+          "$GITHUB_ACTION_PATH/classify_pr_change.sh" \
+            "$range_diff_file" \
+            "$previous_has_merges" \
+            "$current_has_merges"
+        )
+
+        if [[ "$classification" == "changed" ]]; then
+          echo "reason=diff-changed" >> "$GITHUB_OUTPUT"
+          echo "::notice::The pull request diff changed; the first 500 range-diff lines follow."
+          awk 'NR <= 500 { print } END { if (NR > 500) print "... output truncated ..." }' "$range_diff_file"
+        elif [[ "$classification" == "unchanged" ]]; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          echo "reason=unchanged" >> "$GITHUB_OUTPUT"
+          echo "::notice::The pull request diff did not change."
+        else
+          echo "::error::Unexpected range-diff classification: $classification"
+          exit 1
+        fi
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPOSITORY: ${{ github.repository }}
+        FETCH_DEPTH: ${{ inputs.fetch-depth }}
+        BASELINE_FOUND: ${{ steps.previous.outputs.found }}
+        PREV_HEAD_SHA: ${{ steps.previous.outputs.head-sha }}
+        PREV_BASE_SHA: ${{ steps.previous.outputs.base-sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
     - name: Write SHAs to file
       if: steps.check.outcome == 'success'
       shell: bash
       run: |
-        echo "${{ env.HEAD_SHA }}" > shas.txt
-        echo "${{ env.BASE_SHA }}" >> shas.txt
+        set -euo pipefail
+        umask 077
+        install -d -m 700 "$CURRENT_SHAS_DIR"
+        printf '%s\n%s\n' "$HEAD_SHA" "$BASE_SHA" > "$CURRENT_SHAS_DIR/shas.txt"
+      env:
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        CURRENT_SHAS_DIR: ${{ runner.temp }}/dismiss-stale-approvals-${{ github.run_id }}
 
     - name: Upload SHAs
       if: steps.check.outcome == 'success'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       continue-on-error: true
-      id: artifact-upload-step
       with:
         name: dismiss-stale-approvals-shas
-        path: shas.txt
-
-    - name: Construct dismissal reason
-      if: env.MATCH != '1'
-      shell: bash
-      run: |
-        if [ "${{ env.MATCH }}" == "0" ]; then
-          DETAILS='See the output of `git range-diff` at '
-        elif [ "${{ env.MATCH }}" == "-1" ]; then
-          DETAILS="No previous SHAs found; treated as if diff has changed at "
-        else
-          DETAILS="Failed to check if diff has changed; see action logs at "
-        fi
-        echo "REASON=Your organization requires reapproval when changes are made, so Graphite has dismissed approvals. ${DETAILS}${{ env.WORKFLOW_RUN_URL }}" >> $GITHUB_ENV
+        path: ${{ runner.temp }}/dismiss-stale-approvals-${{ github.run_id }}/shas.txt
+        retention-days: 30
 
     - name: Dismiss approvals unless diff is proven unchanged
-      if: env.MATCH != '1'
-      uses: withgraphite/dismiss-all-approvals-js@main
-      with:
-        github-token: ${{ inputs.github-token }}
-        dry-run: ${{ inputs.dry-run }}
-        reason: ${{ env.REASON }}
+      if: steps.check.outcome != 'success' || steps.check.outputs.changed != 'false'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ "$CHECK_OUTCOME" != "success" ]]; then
+          details="The diff check failed; see the action logs at "
+        elif [[ "$CHANGE_REASON" == "no-baseline" ]]; then
+          details="No previous SHAs were found, so the diff was treated as changed; see "
+        else
+          details='See the `git range-diff` output at '
+        fi
+        reason="Your organization requires reapproval when changes are made. ${details}${WORKFLOW_RUN_URL}"
+
+        "$GITHUB_ACTION_PATH/dismiss_approvals.sh" \
+          "$REPOSITORY" \
+          "$PR_NUMBER" \
+          "$DRY_RUN" \
+          "$reason" \
+          "$HEAD_SHA"
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPOSITORY: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        CHECK_OUTCOME: ${{ steps.check.outcome }}
+        CHANGE_REASON: ${{ steps.check.outputs.reason }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        WORKFLOW_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

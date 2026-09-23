@@ -10,14 +10,24 @@ on:
       ]
   push:
     branches: [main]
-    
+
+permissions:
+  contents: read
+
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-       - name: Checkout
-         uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-       - name: Validate syntax
-         run: bash -n *.sh
+      - name: Validate shell syntax
+        run: bash -n ./*.sh ./tests/*.sh ./tests/lib/*.sh
+
+      - name: Run ShellCheck
+        run: shellcheck ./*.sh ./tests/*.sh ./tests/lib/*.sh
+
+      - name: Run regression tests
+        run: ./tests/run.sh
