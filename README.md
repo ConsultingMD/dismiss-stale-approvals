@@ -7,7 +7,8 @@ Unlike the built in GitHub protection, this action will compare the `git range-d
 
 The action restores the previous pull request head and base SHAs, compares them
 with the current commit range, and dismisses only approvals attached to older
-commits when the changes cannot be proven equivalent.
+commits when the changes cannot be proven equivalent. After dismissing an
+approval it re-requests a review from that approver so they are notified.
 
 See [How dismiss-stale-approvals works](docs/how-it-works.md) for the data
 boundaries, end-to-end flow, security behavior, and failure outcomes.

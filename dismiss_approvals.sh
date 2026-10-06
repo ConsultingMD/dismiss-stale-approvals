@@ -62,7 +62,19 @@ if [[ "$live_head_sha" != "$current_head_sha" ]]; then
   exit 0
 fi
 
+# Accepts the characters GitHub allows in a user login: letters, digits,
+# hyphens, and underscores. Enterprise Managed User logins contain an
+# underscore ("username_shortcode") and can exceed 39 characters because of the
+# suffix. This also rejects bot accounts ("name[bot]"), which cannot be asked to
+# review.
+is_requestable_login() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$ ]]
+}
+
+# approval_ids[i] is the review ID and approval_logins[i] is its author's
+# login (empty when GitHub returns no user, such as for a deleted account).
 approval_ids=()
+approval_logins=()
 page=1
 while :; do
   reviews=$(github_api \
@@ -87,9 +99,10 @@ while :; do
     exit 1
   fi
 
-  while IFS= read -r approval_id; do
+  while IFS=$'\t' read -r approval_id approval_login; do
     if [[ -n "$approval_id" ]]; then
       approval_ids+=("$approval_id")
+      approval_logins+=("$approval_login")
     fi
   done < <(
     jq -r \
@@ -99,7 +112,7 @@ while :; do
           .state == "APPROVED" and
           (.commit_id | ascii_downcase) != ($current_head_sha | ascii_downcase)
         ) |
-        .id' <<< "$reviews"
+        "\(.id)\t\(.user.login? // "" | tostring | gsub("[\t\n\r]"; ""))"' <<< "$reviews"
   )
 
   review_count=$(jq 'length' <<< "$reviews")
@@ -120,21 +133,44 @@ if [[ "$live_head_sha" != "$current_head_sha" ]]; then
   exit 0
 fi
 
+# Space-delimited, so membership is a substring test that works on bash 3.2.
+reviewers_to_request=" "
+for approval_login in "${approval_logins[@]}"; do
+  if is_requestable_login "$approval_login" &&
+    [[ "$reviewers_to_request" != *" $approval_login "* ]]; then
+    reviewers_to_request+="$approval_login "
+  fi
+done
+read -r -a reviewer_list <<< "$reviewers_to_request"
+reviewer_count=${#reviewer_list[@]}
+
 if [[ "$dry_run" == "true" ]]; then
   body="dismiss-stale-approvals dry run: Would have dismissed ${#approval_ids[@]} approval(s) with reason:
 
 ${reason}"
+  if (( reviewer_count > 0 )); then
+    body+="
+
+Would have re-requested review from: ${reviewer_list[*]/#/@}"
+  fi
   jq -n --arg body "$body" '{body: $body}' |
     github_api \
       --request POST \
       --data-binary @- \
       "https://api.github.com/repos/${repository}/issues/${pr_number}/comments" >/dev/null
-  echo "::notice::Dry run: would dismiss ${#approval_ids[@]} approval(s)."
+  echo "::notice::Dry run: would dismiss ${#approval_ids[@]} approval(s) and re-request review from ${reviewer_count} reviewer(s)."
   exit 0
 fi
 
+# Dismissal is what makes an approval stop counting, so a failed dismissal
+# fails the job. Re-requesting only notifies the reviewer, so a failure there
+# warns without failing the job.
 payload=$(jq -n --arg message "$reason" '{message: $message}')
-for approval_id in "${approval_ids[@]}"; do
+requested_count=0
+requested_so_far=" "
+for index in "${!approval_ids[@]}"; do
+  approval_id=${approval_ids[$index]}
+  approval_login=${approval_logins[$index]}
   if [[ ! "$approval_id" =~ ^[1-9][0-9]*$ ]]; then
     echo "GitHub returned an invalid review ID" >&2
     exit 1
@@ -144,6 +180,26 @@ for approval_id in "${approval_ids[@]}"; do
     --data-binary @- \
     "https://api.github.com/repos/${repository}/pulls/${pr_number}/reviews/${approval_id}/dismissals" \
     <<< "$payload" >/dev/null
+
+  if ! is_requestable_login "$approval_login"; then
+    # Say so instead of skipping silently, so a missed notification is visible.
+    echo "::notice::Dismissed approval ${approval_id} but did not re-request review: its author (${approval_login:-no user}) cannot be requested."
+    continue
+  fi
+  if [[ "$requested_so_far" == *" $approval_login "* ]]; then
+    continue
+  fi
+  requested_so_far+="$approval_login "
+  if jq -n --arg reviewer "$approval_login" '{reviewers: [$reviewer]}' |
+    github_api \
+      --request POST \
+      --data-binary @- \
+      "https://api.github.com/repos/${repository}/pulls/${pr_number}/requested_reviewers" >/dev/null; then
+    ((requested_count += 1))
+  else
+    echo "::warning::Could not re-request review from ${approval_login}."
+  fi
 done
 
 echo "::notice::Dismissed ${#approval_ids[@]} approval(s)."
+echo "::notice::Re-requested review from ${requested_count} reviewer(s)."
