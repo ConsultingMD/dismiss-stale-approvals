@@ -36,9 +36,20 @@ contains no repository contents or credentials.
 of the same workflow for the same pull request. It downloads that run's
 artifact and verifies that:
 
-- the artifact contains exactly two valid commit SHAs;
-- those SHAs match the pull request head and base recorded on that run; and
-- the artifact has not expired.
+- the artifact has not expired;
+- the artifact contains exactly two valid 40-character commit SHAs; and
+- the first SHA (the head) equals the `head_sha` of the selected run.
+
+The run's `head_sha` is the commit that run executed against, and GitHub never
+changes it. The script does not compare against the `pull_requests[]` entry on
+the run. GitHub rewrites that entry's `head.sha` and `base.sha` to the pull
+request's *current* head and base after the run finishes, so they no longer
+describe the run. The script uses `pull_requests[].number` only to associate
+the run with the pull request.
+
+A workflow run records no immutable base SHA, so the second SHA (the base) is
+checked only for format. It is trusted because it comes from the artifact
+attached to that same run.
 
 If no trustworthy artifact exists, the action treats the pull request as
 changed.

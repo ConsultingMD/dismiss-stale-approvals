@@ -77,24 +77,15 @@ while :; do
   ((page += 1))
 done
 latest_workflow_run_id=$(jq -er '.id | select(type == "number")' <<< "$selected_workflow_run")
-expected_head_sha=$(jq -er \
-  --argjson pr_number "$pr_number" \
-  '.pull_requests[]
-    | select(.number == $pr_number)
-    | .head.sha
-    | select(type == "string")' <<< "$selected_workflow_run")
-expected_base_sha=$(jq -er \
-  --argjson pr_number "$pr_number" \
-  '.pull_requests[]
-    | select(.number == $pr_number)
-    | .base.sha
-    | select(type == "string")' <<< "$selected_workflow_run")
-for sha in "$expected_head_sha" "$expected_base_sha"; do
-  if [[ ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
-    echo "Previous workflow run contains an invalid pull request SHA" >&2
-    exit 1
-  fi
-done
+# The run's own head_sha is the commit it executed against and never changes.
+# pull_requests[].head.sha and .base.sha are rewritten by GitHub to the pull
+# request's current head and base, so they are not historical and must not be
+# used here. pull_requests[].number is only used above to select the run.
+expected_head_sha=$(jq -er '.head_sha | select(type == "string")' <<< "$selected_workflow_run")
+if [[ ! "$expected_head_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo "Previous workflow run contains an invalid head SHA" >&2
+  exit 1
+fi
 echo "Previous workflow run ID: $latest_workflow_run_id" >&2
 
 latest_artifact_id=
@@ -151,9 +142,9 @@ for sha in "${shas[@]}"; do
     exit 1
   fi
 done
-if [[ "${shas[0]}" != "$expected_head_sha" ]] ||
-  [[ "${shas[1]}" != "$expected_base_sha" ]]; then
-  echo "Artifact SHAs do not match the selected workflow run" >&2
+# A workflow run records no immutable base SHA, so only the head is verified.
+if [[ "${shas[0]}" != "$expected_head_sha" ]]; then
+  echo "Artifact head SHA does not match the selected workflow run head_sha" >&2
   exit 1
 fi
 
