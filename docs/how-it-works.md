@@ -22,7 +22,8 @@ of data:
 3. The repository's Git objects supply the commit history needed for
    `git range-diff`.
 4. The GitHub Pull Request Reviews API supplies current approvals and accepts
-   dismissal requests.
+   dismissal requests. The pull request review-request API accepts requests
+   for reviewers to look at the pull request again.
 
 The source repository remains the source of truth for commits and reviews. The
 artifact is only a pointer to the previously checked head and base commits. It
@@ -79,28 +80,44 @@ Comparison failures do not upload an artifact. If the latest successful
 workflow run has no valid artifact, the next run treats the baseline as
 missing and therefore treats the pull request as changed.
 
-### 4. Dismiss only stale approvals
+### 4. Dismiss only stale approvals, then ask for re-review
 
 When the pull request changed,
 [`dismiss_approvals.sh`](../dismiss_approvals.sh) reads all review pages from
 GitHub. It dismisses an active approval only when the review's commit differs
 from the current pull request head.
 
+Dismissing is what stops an approval from counting toward required reviews. It
+does not tell the reviewer anything, so after each successful dismissal the
+script also re-requests a review from that approver. A reviewer with several
+stale approvals is re-requested once. The re-request is a notification, not an
+enforcement mechanism: it does not dismiss the existing approval, so it cannot
+replace the dismissal.
+
+A failed dismissal fails the job, because the approval would still count. A
+failed re-request only produces a warning, because the stale approval is
+already dismissed and only the notification was missed. The script skips
+approvals whose author is a bot or a deleted account, which GitHub cannot
+re-request. In dry-run mode the script re-requests no one and lists the
+reviewers it would re-request in its pull request comment.
+
 The script checks the live pull request head before and after reading reviews.
 If another push changed the head while an older workflow was running, that
-workflow exits without dismissing approvals on the newer version.
+workflow exits without dismissing approvals or re-requesting reviews on the
+newer version.
 
 ## Decision outcomes
 
 | Condition | Outcome |
 | --- | --- |
 | Valid comparison proves the ranges are unchanged | Preserve approvals |
-| Commit content or structure changed | Dismiss approvals for older commits |
+| Commit content or structure changed | Dismiss approvals for older commits and re-request review from those approvers |
 | Either range contains a merge commit | Treat as changed |
 | Baseline is missing, expired, or invalid | Treat as changed |
 | Fetch or comparison fails | Treat as changed |
 | Pull request head changes while the workflow runs | Let the newer run decide |
 | Review dismissal fails | Fail the job so a required check remains blocking |
+| Review re-request fails after a dismissal | Warn and continue; the approval is already dismissed |
 
 ## Permissions and security
 
